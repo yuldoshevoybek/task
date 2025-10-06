@@ -1,41 +1,34 @@
 import requests
 import pandas as pd
 import json
+import itertools
 
-# ----------------------------------------
 # API Configuration
-# ----------------------------------------
-# Supabase REST API endpoint (points to the 'commdata' table)
+
 url = "https://xrfvuwgjrlznxdhiqded.supabase.co/rest/v1/commdata"
 
-# Authentication headers
 headers = {
     "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhyZnZ1d2dqcmx6bnhkaGlxZGVkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NzQ5NzEyNSwiZXhwIjoyMDczMDczMTI1fQ.sFT6MsN7Phla94BIyHXRjiLZB8TLQof9U17Rv51XJaM",
     "apikey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhyZnZ1d2dqcmx6bnhkaGlxZGVkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NzQ5NzEyNSwiZXhwIjoyMDczMDczMTI1fQ.sFT6MsN7Phla94BIyHXRjiLZB8TLQof9U17Rv51XJaM"
 }
 
-# Query parameters — limit to 100 rows
 params = {
     "limit": 100
 }
 
 # Send Request and Validate Response
+
 response = requests.get(url, headers=headers, params=params)
-
-if response.status_code == 200:
-    data = response.json()
-    print("Successfully retrieved", len(data), "rows from Supabase API")
-else:
+if response.status_code != 200:
     raise Exception(f"Error {response.status_code}: {response.text}")
+data = response.json()
+print(f"Retrieved {len(data)} rows")
 
+# Transform and Normalize JSON Data
 
-# Transform Raw JSON Data
-# ----------------------------------------
-# Each record has some base fields + nested JSON data inside 'raw_content'
 rows = []
 
 for item in data:
-    # Extract base-level fields directly available in the response
     base = {
         "id": item.get("id"),
         "comm_type": item.get("comm_type"),
@@ -46,13 +39,11 @@ for item in data:
         "is_processed": item.get("is_processed"),
     }
 
-    # Try to decode 'raw_content' JSON safely
     try:
         raw = json.loads(item.get("raw_content", "{}"))
     except json.JSONDecodeError:
         raw = {}
 
-    # Add fields from the nested JSON (raw_content)
     base.update({
         "raw_id": raw.get("id"),
         "title": raw.get("title"),
@@ -64,29 +55,51 @@ for item in data:
         "dateString": raw.get("dateString"),
         "host_email": raw.get("host_email"),
         "organizer_email": raw.get("organizer_email"),
-        # Join list items into comma-separated strings
-        "participants": ", ".join(raw.get("participants", [])),
-        "speakers": ", ".join(raw.get("speakers", [])),
-        "meeting_attendees": ", ".join(
-            [attendee.get("email", "") for attendee in raw.get("meeting_attendees", [])]
-        )
+        "participants": raw.get("participants", []),
+        "speakers": raw.get("speakers", []),
+        "meeting_attendees": [m.get("email", "") for m in raw.get("meeting_attendees", [])],
     })
 
-    # Append the transformed row to the list
     rows.append(base)
 
-# Create DataFrame and Save to Excel
 df = pd.DataFrame(rows)
 
-# Export the cleaned data to Excel file
+# Identify a column that contain a list
+list_columns = [
+    col for col in df.columns
+    if df[col].apply(lambda x: isinstance(x, list)).any()
+]
+
+print("List columns detected:", list_columns)
+
+# If there are list columns, expand them
+if list_columns:
+    expanded_rows = []
+    for _, row in df.iterrows():
+        # Convert to dict so we can modify safely
+        row_dict = row.to_dict()
+        # Extract only list columns
+        lists_to_expand = {col: row_dict[col] for col in list_columns if isinstance(row_dict[col], list)}
+
+        # If none of them are lists → just append once
+        if not lists_to_expand:
+            expanded_rows.append(row_dict)
+            continue
+
+        # Otherwise, generate cartesian product of all list elements
+        # (so if a row has 2 participants and 3 speakers → 2×3=6 rows)
+        keys, values = zip(*lists_to_expand.items())
+        for combination in itertools.product(*values):
+            new_row = row_dict.copy()
+            for i, key in enumerate(keys):
+                new_row[key] = combination[i]
+            expanded_rows.append(new_row)
+
+for col in list_columns:
+    df[col] = df[col].apply(lambda x: list(set(x)) if isinstance(x, list) else x)
+
+    df = pd.DataFrame(expanded_rows)
+
 output_file = "data.xlsx"
 df.to_excel(output_file, index=False)
-
-print(f"Data successfully saved to '{output_file}' ({df.shape[0]} rows, {df.shape[1]} columns)")
-
-# ----------------------------------------
-# Summary
-# ✅ Connected to Supabase API
-# ✅ Retrieved 100 rows
-# ✅ Extracted 20+ fields (including nested JSON data)
-# ✅ Saved to Excel in tabular format
+print(f"Dataset saved to '{output_file}' — {df.shape[0]} rows × {df.shape[1]} columns")
